@@ -1,0 +1,5 @@
+timestamp,run_id,scenario,mode,total_requests,success_count,failures,integrity_violation,duration_ms,notes
+2026-02-02 22:29:59,0c0dc2e0,retry_storm,baseline,50,50,0,True,183.36,Unique Orders: 50
+2026-02-02 22:29:59,e3fb3809,concurrent_race,baseline,10,10,0,True,49.86,Unique Orders: 10
+2026-02-02 22:31:31,7f007c0d,retry_storm,hardened,50,50,0,False,124.18,Unique Orders: 1
+2026-02-02 22:31:31,be9d5766,concurrent_race,hardened,10,10,0,False,14.73,Unique Orders: 1

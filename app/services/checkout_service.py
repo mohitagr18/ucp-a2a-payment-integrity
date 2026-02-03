@@ -2,6 +2,7 @@ from app.infra.store import Store
 from app.domain.models import Checkout, LineItem, CheckoutStatus
 from app.infra.lock_manager import LockManager, InMemoryLockManager
 from app.infra.idempotency import IdempotencyStore, IdempotencyKey, InMemoryIdempotencyStore
+from app.settings import settings
 
 class CheckoutService:
     def __init__(
@@ -86,10 +87,21 @@ class CheckoutService:
         payment_data: dict,
         risk_signals: dict | None = None,
     ) -> Checkout:
-        # Idempotency
+        
+        # --- BYPASS IF SAFETY OFF ---
+        if settings.SAFETY_MODE == "off":
+            # Naive implementation (The "Before" state)
+            checkout = await self.store.get_checkout(checkout_id)
+            order = await self.store.create_order(checkout=checkout)
+            checkout.order_id = order.order_id
+            checkout.status = CheckoutStatus.COMPLETED
+            await self.store.save_checkout(checkout)
+            return checkout
+
+        # --- NORMAL HARDENED LOGIC ---
         key = IdempotencyKey(context_id, message_id, "complete_checkout")
         if await self.idempotency.get(key):
-            return await self.store.get_checkout(checkout_id)
+             return await self.store.get_checkout(checkout_id)
 
         async with self.locks.lock(checkout_id):
             checkout = await self.store.get_checkout(checkout_id)
