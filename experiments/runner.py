@@ -136,54 +136,52 @@ async def run_mutation_race(n_pairs: int, mode_label: str):
     """
     Scenario 3: The 'Sneaky Add'
     Fires 'Complete Checkout' and 'Add Item' simultaneously.
+    Success Criteria: The final total must match the paid total.
     """
     run_id = str(uuid.uuid4())[:8]
     print(f"[{run_id}] Starting Mutation Race (N={n_pairs}, Mode={mode_label})...")
 
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=30.0) as client:
-        # Setup: Cart with $20 (1 item)
         context_id = f"ctx_{run_id}"
-        cid = await setup_checkout(client, context_id) 
-
-        start_time = time.time()
-        
-        # We run N pairs of (Pay vs Add) on N different carts to get statistical significance
-        # actually, let's just do 1 massive race on 1 cart? 
-        # No, mutation race is best tested as "1 Pay vs 1 Add".
-        # So we will loop N times, creating N carts.
         
         violations = 0
         
+        # Run N separate race pairs
         for i in range(n_pairs):
-            # Setup fresh cart for each race pair
             pair_ctx = f"{context_id}_{i}"
-            cid = await setup_checkout(client, pair_ctx) # Cart has $20
+            # Setup: Cart with 1 item ($20)
+            cid = await setup_checkout(client, pair_ctx) 
             
-            # Task A: Pay (Price $20)
+            # Fire both at once
             task_pay = client.post("/a2a", json={
                 "kind": "message", "role": "user", "messageId": f"pay_{i}", "contextId": pair_ctx,
                 "parts": [{"kind": "data", "data": {"action": "complete_checkout", "checkout_id": cid, PAYMENT_DATA_KEY: {"fake": "token"}}}]
             })
             
-            # Task B: Add Item (Price +$20)
             task_add = client.post("/a2a", json={
                 "kind": "message", "role": "user", "messageId": f"add_{i}", "contextId": pair_ctx,
                 "parts": [{"kind": "data", "data": {"action": "add_to_checkout", "checkout_id": cid, "product_id": "p1", "quantity": 1}}]
             })
             
-            res_pay, res_add = await asyncio.gather(task_pay, task_add)
+            res_pay, res_add = await asyncio.gather(task_pay, task_add, return_exceptions=True)
             
-            # Analysis
+            if isinstance(res_pay, Exception) or res_pay.status_code != 200:
+                continue # Skip if payment failed completely
+
             pay_data = res_pay.json()["parts"][0]["data"].get(DATAPART_CHECKOUT_KEY)
             
+            # If payment succeeded (created an order)
             if pay_data and pay_data.get("order_id"):
                 paid_total = pay_data["total_cents"]
-                # If we paid $20, but the add succeeded AFTER payment started but BEFORE it finished 
-                # (dirty read), that's bad. 
-                # Actually, simplest check: 
-                # If Status is COMPLETED, final total must equal paid total.
                 
-                # Refetch final state
+                # Check final state of the cart
+                # We expect either:
+                # A) Payment won first -> Status is COMPLETED, Add failed/ignored -> Final Total == Paid Total ($20)
+                # B) Add won first -> Total became $40, then Payment happened -> Paid Total == Final Total ($40)
+                
+                # Violation: We Paid $20, but final state is $40 (Item sneaked in)
+                
+                # Fetch fresh state
                 final = await client.post("/a2a", json={
                     "kind": "message", "role": "user", "messageId": f"verify_{i}", "contextId": pair_ctx,
                     "parts": [{"kind": "data", "data": {"action": "add_to_checkout", "checkout_id": cid, "product_id": "p1", "quantity": 0}}]
@@ -193,8 +191,6 @@ async def run_mutation_race(n_pairs: int, mode_label: str):
                 if final_data["total_cents"] != paid_total:
                     violations += 1
             
-        duration = (time.time() - start_time) * 1000
-
         result = ExperimentResult(
             run_id=run_id,
             scenario="mutation_race",
@@ -203,7 +199,7 @@ async def run_mutation_race(n_pairs: int, mode_label: str):
             success_count=(n_pairs * 2),
             failure_count=0,
             integrity_violation=(violations > 0),
-            duration_ms=duration,
+            duration_ms=0, # Not tracking duration for this loop
             notes=f"Inconsistent States: {violations}"
         )
         return result
@@ -220,13 +216,20 @@ def main():
     
     print(f"Running Experiments -> {CSV_FILE} [Mode: {args.mode}]")
     
+    # 1. Storm
     res1 = asyncio.run(run_retry_storm(args.storm, args.mode))
     writer.write(res1)
-    print(f" > Storm Result: Violation={res1.integrity_violation}, Orders={res1.notes}")
+    print(f" > Storm Result: Violation={res1.integrity_violation}")
 
+    # 2. Race
     res2 = asyncio.run(run_race_condition(args.race, args.mode))
     writer.write(res2)
-    print(f" > Race Result:  Violation={res2.integrity_violation}, Orders={res2.notes}")
+    print(f" > Race Result:  Violation={res2.integrity_violation}")
+    
+    # 3. Mutation (New) - Use 'race' count for N pairs
+    res3 = asyncio.run(run_mutation_race(args.race, args.mode))
+    writer.write(res3)
+    print(f" > Mutation Result: Violation={res3.integrity_violation}, {res3.notes}")
 
 if __name__ == "__main__":
     main()
