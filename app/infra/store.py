@@ -1,6 +1,6 @@
 from typing import Protocol, Dict
 import uuid
-from app.domain.models import Product, Checkout, Order
+from app.domain.models import Product, Checkout, Order, CheckoutStatus
 
 class Store(Protocol):
     async def list_products(self) -> list[Product]: ...
@@ -28,7 +28,7 @@ class InMemoryStore(Store):
 
     async def create_checkout(self) -> Checkout:
         cid = str(uuid.uuid4())
-        c = Checkout(checkout_id=cid, status="incomplete")
+        c = Checkout(checkout_id=cid, status=CheckoutStatus.INCOMPLETE)
         self.checkouts[cid] = c
         return c
 
