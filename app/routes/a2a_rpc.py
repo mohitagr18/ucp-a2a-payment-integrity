@@ -5,6 +5,8 @@ from app.infra.store import InMemoryStore
 from app.services.checkout_service import CheckoutService
 from app.services.catalog_service import CatalogService
 from app.services.payment_service import PaymentService
+from app.infra.lock_manager import InMemoryLockManager
+from app.infra.idempotency import InMemoryIdempotencyStore
 
 router = APIRouter()
 
@@ -12,9 +14,11 @@ router = APIRouter()
 store = InMemoryStore()
 payment_svc = PaymentService() 
 catalog_svc = CatalogService(store) 
+lock_manager = InMemoryLockManager()
+idempotency_store = InMemoryIdempotencyStore()
 
 # Pass payment to checkout
-checkout_svc = CheckoutService(store=store, payment=payment_svc) 
+checkout_svc = CheckoutService(store=store, payment=payment_svc, locks=lock_manager, idempotency=idempotency_store) 
 
 services = ServiceContainer(
     store=store, 
