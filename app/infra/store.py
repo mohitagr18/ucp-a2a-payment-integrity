@@ -131,14 +131,39 @@ class SQLiteStore(Store):
 
     async def get_checkout(self, checkout_id: str) -> Optional[Checkout]:
         async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("SELECT * FROM checkouts WHERE checkout_id=?", (checkout_id,)) as cursor:
+            # FIX: Select columns explicitly to guarantee order
+            query = """
+                SELECT checkout_id, status, total_cents, line_items_json, order_id, order_permalink_url 
+                FROM checkouts 
+                WHERE checkout_id=?
+            """
+            async with db.execute(query, (checkout_id,)) as cursor:
                 row = await cursor.fetchone()
                 if not row:
                     return None
+                
                 cid, status_str, total, items_json, oid, url = row
-                items_data = json.loads(items_json)
+                
+                # Ensure items_json is a string list, or default to empty list if None/Empty
+                if not items_json:
+                    items_data = []
+                else:
+                    try:
+                        items_data = json.loads(items_json)
+                    except json.JSONDecodeError:
+                        items_data = []
+
                 line_items = [LineItem(**item) for item in items_data]
-                return Checkout(cid, CheckoutStatus(status_str), total, line_items, oid, url)
+                
+                return Checkout(
+                    checkout_id=cid,
+                    status=CheckoutStatus(status_str),
+                    total_cents=total,
+                    line_items=line_items,
+                    order_id=oid,
+                    order_permalink_url=url
+                )
+
 
     async def save_checkout(self, checkout: Checkout) -> None:
         items_json = json.dumps([asdict(li) for li in checkout.line_items])
