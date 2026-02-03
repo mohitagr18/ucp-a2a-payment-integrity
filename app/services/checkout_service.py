@@ -31,35 +31,39 @@ class CheckoutService:
         product_id: str,
         quantity: int,
     ) -> Checkout:
-        # 1. Idempotency Check
+        
+        # --- UNSAFE MODE (For Baseline Experiments) ---
+        if settings.SAFETY_MODE == "off":
+            checkout = await self.store.get_checkout(checkout_id)
+            product = await self.store.get_product(product_id)
+            checkout.line_items.append(LineItem(product.product_id, quantity, product.price_cents))
+            checkout.total_cents += (quantity * product.price_cents)
+            await self.store.save_checkout(checkout)
+            return checkout
+
+        # --- HARDENED MODE ---
         key = IdempotencyKey(context_id, message_id, "add_to_checkout")
         cached = await self.idempotency.get(key)
         if cached:
-            # We need to return a Checkout object, but we stored a dict or similar.
-            # For simplicity in Phase 2, we re-fetch the checkout state.
-            # In a strict system, we'd store the specific return value.
             return await self.store.get_checkout(checkout_id)
 
-        # 2. Lock
         async with self.locks.lock(checkout_id):
-            # 3. Double-check idempotency inside lock (advanced, but good practice)
-            # (Skipping for minimal academic scope, relying on outer check)
-
             checkout = await self.store.get_checkout(checkout_id)
-            if not checkout:
-                raise ValueError("Checkout not found")
             
-            # Logic
+            # CRITICAL CHECK: Don't allow adding items if already paid!
+            if checkout.status == CheckoutStatus.COMPLETED:
+                # Return current state without changes
+                return checkout
+                
             product = await self.store.get_product(product_id)
             checkout.line_items.append(LineItem(product.product_id, quantity, product.price_cents))
             checkout.total_cents += (quantity * product.price_cents)
             
             await self.store.save_checkout(checkout)
-            
-            # 4. Save Idempotency
             await self.idempotency.put(key, {"status": "done"})
             
             return checkout
+
 
     async def start_payment(self, *, context_id: str, message_id: str, checkout_id: str) -> Checkout:
         # Idempotency
