@@ -1,4 +1,3 @@
-
 # UCP Agent: Payment Integrity & Idempotency Experiment
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
@@ -7,61 +6,115 @@
 [![Protocol: UCP](https://img.shields.io/badge/Protocol-UCP_Checkout-orange.svg)](https://ucp.dev)
 [![Status: Research Prototype](https://img.shields.io/badge/Status-Research_Prototype-red.svg)]()
 
-A minimal, high-fidelity implementation of a **Universal Commerce Protocol (UCP)** Checkout Agent over **Agent-to-Agent (A2A)** messaging. 
+A minimal, high-fidelity implementation of a **Universal Commerce Protocol (UCP)** Checkout Agent over **Agent-to-Agent (A2A)** messaging.
 
-This repository serves as the artifact for an academic study on **Payment Integrity in Agentic Commerce**. It demonstrates how "naive" agent implementations create critical double-spend and state-corruption vulnerabilities, and provides a hardened reference architecture using strict **Idempotency** and **Checkout-Level Locking**.
+This repository serves as the artifact for an academic study on **Payment Integrity in Agentic Commerce**. It demonstrates how "naive" agent implementations create critical double-spend and state-corruption vulnerabilities, and provides a **production-scalable hardened reference architecture** using:
+
+- **Message-Level Idempotency** (prevents duplicate processing)
+- **Checkout-Level Locking** (prevents concurrent races)
+- **Database Unique Constraints** (multi-worker duplicate prevention)
+- **Optimistic Concurrency Control** (prevents mutation races via versioning)
 
 ---
 
 ## 🔬 Research Scenarios & Results
 
-We subjected the agent to three distinct concurrency stress tests (N=10 to N=200 requests) in both **Baseline (Naive)** and **Hardened** modes. The results, generated on Apple M2 hardware, are summarized below.
+We subjected the agent to three distinct concurrency stress tests (N=10 to N=800 requests) in both **Baseline (Naive)** and **Hardened** modes with **4 Uvicorn workers** (multi-process deployment).
+
+### Results at a Glance
+
+| Scenario | Baseline (Naive) | Hardened (Proposed) |
+|:---|:---|:---|
+| **Retry Storm** (N=800) | 800 unique orders ❌ | **1 unique order** ✅ |
+| **Concurrent Race** | Multiple winners ❌ | **Single winner (1 order)** ✅ |
+| **Mutation Race** | 36% state corruption ❌ | **0% corruption** ✅ |
 
 ### 1. The "Retry Storm" (Network Duplication)
-*   **Scenario:** A client (or network intermediary) sends the exact same `complete_checkout` message N times in rapid succession.
-*   **Vulnerability:** Naive agents treat each message as a new intent, charging the user N times.
-*   **Result:**
-    *   **Baseline:** 100% Failure Rate. At N=200, **200 unique orders** were created for a single cart.
-    *   **Hardened:** 0% Failure Rate. At N=200, **exactly 1 order** was created.
-    *   **Performance:** Hardened mode was **3.1x faster** (232ms vs 739ms) because cached idempotent responses bypass expensive write operations.
+- **Scenario:** A client (or network intermediary) sends the exact same `complete_checkout` message N times in rapid succession.
+- **Vulnerability:** Naive agents treat each message as a new intent, charging the user N times.
+- **Result:**
+  - **Baseline:** 100% Failure Rate. At N=800, **800 unique orders** were created for a single cart.
+  - **Hardened:** 0% Failure Rate. At N=800, **exactly 1 order** was created.
 
 ### 2. The "Concurrent Race" (Parallel Payment)
-*   **Scenario:** N distinct users (or devices) attempt to pay for the same shared cart at the exact same millisecond.
-*   **Vulnerability:** Without locking, multiple threads read the "Unpaid" state simultaneously and proceed to capture funds.
-*   **Result:**
-    *   **Baseline:** 100% Failure Rate. Multiple winners in the race, leading to double-spending.
-    *   **Hardened:** 0% Failure Rate. Transactional locks ensured strict serialization; only the first request succeeded.
+- **Scenario:** N distinct users (or devices) attempt to pay for the same shared cart at the exact same millisecond.
+- **Vulnerability:** Without locking, multiple threads read the "Unpaid" state simultaneously and proceed to capture funds.
+- **Result:**
+  - **Baseline:** 100% Failure Rate. Multiple winners in the race, leading to double-spending.
+  - **Hardened:** 0% Failure Rate. Database unique constraint ensures only the first request succeeds.
 
 ### 3. The "Mutation Race" (The Sneaky Add)
-*   **Scenario:** User A clicks "Pay" ($20) while User B clicks "Add Item" ($20) on the same cart simultaneously.
-*   **Vulnerability:** "Dirty Reads." The payment logic reads $20, authorizes $20, but the Add logic commits $40. The order is marked "Paid" but the cart total ($40) mismatches the payment ($20).
-*   **Result:**
-    *   **Baseline:** High Failure Rate. At N=200 pairs (400 requests), **146 inconsistent states** were recorded (36% corruption rate).
-    *   **Hardened:** 0% Failure Rate. **0 inconsistent states.** The lock forces operations to be sequential.
+- **Scenario:** User A clicks "Pay" ($20) while User B clicks "Add Item" ($20) on the same cart simultaneously.
+- **Vulnerability:** "Dirty Reads." The payment logic reads $20, authorizes $20, but the Add logic commits $40.
+- **Result:**
+  - **Baseline:** High Failure Rate. At N=200 pairs, **146 inconsistent states** (36% corruption).
+  - **Hardened:** 0% Failure Rate. **Optimistic Concurrency Control (versioning)** detects stale reads.
+
+### Visual Results
+
+<div align="center">
+  <img src="docs/plots/integrity_plot.png" alt="Double Spend Prevention Results" width="600"/>
+  <p><em>Figure 1: Baseline allows duplicate orders to scale linearly (red). Hardened enforces exactly 1 order (green).</em></p>
+</div>
+
+<div align="center">
+  <img src="docs/plots/latency_plot.png" alt="P95 Latency Scalability" width="600"/>
+  <p><em>Figure 2: P95 latency grows linearly, confirming stable database locking overhead.</em></p>
+</div>
 
 ---
 
 ## 🏗 Architecture
 
-The system mimics a real-world "Headless Merchant" agent:
+### Multi-Worker Production Topology
 
-*   **Protocol:** [Agent-to-Agent (A2A)](https://a2a-protocol.org) over JSON-RPC.
-*   **Binding:** [UCP Checkout](https://ucp.dev).
-*   **Runtime:** Python FastAPI + Uvicorn (ASGI).
-*   **Persistence:** SQLite (File-based) with strict transactional isolation.
-*   **Logic:** 
-    *   **Baseline Mode:** Naive implementation (vulnerable).
-    *   **Hardened Mode:** Uses `IdempotencyStore` (caches responses by `messageId`) and `LockManager` (mutex per `checkout_id`).
+```
+┌────────────────┐
+│   Client/LLM   │
+└───────┬────────┘
+        │
+        ▼
+┌────────────────┐
+│  Load Balancer │
+│   (Port 8000)  │
+└───────┬────────┘
+        │
+        ▼
+┌───────────────────────────────────────────┐
+│      Application Layer (Stateless)        │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐   │
+│  │Worker 1 │  │Worker 2 │  │Worker 3 │   │
+│  └────┬────┘  └────┬────┘  └────┬────┘   │
+└───────┼────────────┼────────────┼────────┘
+        │            │            │
+        ▼            ▼            ▼
+┌───────────────────────────────────────────┐
+│     Persistence Layer (SQLite)            │
+│  ┌─────────────────────────────────────┐  │
+│  │ UNIQUE INDEX idx_orders_checkout_id │  │
+│  │ VERSION column for OCC              │  │
+│  └─────────────────────────────────────┘  │
+└───────────────────────────────────────────┘
+```
 
-### Key Components
+### Key Safety Mechanisms
 
-| Component | Responsibility | Phase Implemented |
-| :--- | :--- | :--- |
-| `app/routes/a2a_rpc.py` | A2A Protocol Endpoint & Dispatcher | Phase 1 |
-| `app/infra/store.py` | SQLite persistence for Checkouts/Orders | Phase 3 |
-| `app/infra/idempotency.py` | Caches A2A responses to prevent re-processing | Phase 2 |
-| `app/infra/lock_manager.py` | Handles concurrency locking for carts | Phase 2 |
-| `experiments/runner.py` | CLI harness for Retry Storms & Races | Phase 4 |
+| Mechanism | Protection | Layer |
+|:---|:---|:---|
+| `IdempotencyStore` | Cache responses by `messageId` | Application |
+| `LockManager` | Serialize operations per `checkout_id` | Application |
+| `UNIQUE INDEX` on `orders.checkout_id` | Prevent duplicate orders across workers | Database |
+| `version` column + OCC | Prevent mutation races ("sneaky add") | Database |
+
+### Domain Errors
+
+```python
+# Raised on unique constraint violation
+class DuplicateOrderError(Exception): ...
+
+# Raised on version mismatch (cart modified during payment)
+class StateConflictError(Exception): ...
+```
 
 ---
 
@@ -69,8 +122,8 @@ The system mimics a real-world "Headless Merchant" agent:
 
 ### Prerequisites
 
-*   **Python 3.11+**
-*   **[uv](https://github.com/astral-sh/uv)** (Recommended for fast dependency management)
+- **Python 3.11+**
+- **[uv](https://github.com/astral-sh/uv)** (Recommended for fast dependency management)
 
 ### 1. Installation
 
@@ -83,18 +136,23 @@ cd ucp-a2a-payment-integrity
 uv sync
 ```
 
-### 2. Run the Agent (Hardened Mode)
+### 2. Run the Agent (Hardened Mode - Single Worker)
 
 ```bash
-uv run uvicorn app.main:create_app --port 8000
+uv run uvicorn app.main:create_app --factory --port 8000
 ```
 
-*   The agent is now listening on `http://localhost:8000/a2a`.
-*   Discovery endpoint: `http://localhost:8000/.well-known/ucp`.
+### 3. Run the Agent (Multi-Worker Production Mode)
 
-### 3. Verify Functionality (Demo)
+```bash
+# Delete stale database
+rm -f test.db
 
-Run the interactive console chat to simulate a user buying a product:
+# Start with 4 workers
+uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000 --workers 4
+```
+
+### 4. Verify Functionality (Demo)
 
 ```bash
 uv run python demo.py
@@ -104,40 +162,45 @@ uv run python demo.py
 
 ## 🧪 Reproducing Experiments
 
-This repository includes a deterministic experiment runner to generate the data for the paper.
+### Quick Sweep (All N values, 5 repetitions)
 
-### Experiment 1: Baseline Failure (Vulnerability Demonstration)
+```bash
+# 1. Start Hardened Server (4 workers)
+rm -f test.db
+uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000 --workers 4
 
-Run the server in **UNSAFE** mode to disable locks and idempotency checks.
+# 2. Run Sweep (in another terminal)
+uv run python -m experiments.runner --sweep --mode hardened --reps 5
+```
 
-1.  **Start Server (Unsafe):**
-    ```bash
-    SAFETY_MODE=off uv run uvicorn app.main:create_app --port 8000
-    ```
+### Baseline Comparison
 
-2.  **Run Experiment:**
-    ```bash
-    uv run python -m experiments.runner --storm 50 --race 50 --mode baseline
-    ```
+```bash
+# 1. Start Baseline Server (Safety OFF)
+rm -f test.db
+SAFETY_MODE=off uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000 --workers 4
 
-3.  **Result:** Check `paper_results.csv`. You should see `integrity_violation=True`.
+# 2. Run Baseline Sweep
+uv run python -m experiments.runner --sweep --mode baseline --reps 5
+```
 
-### Experiment 2: Hardened Success (Solution Verification)
+### Experiment Options
 
-Run the server in default **SAFE** mode.
+| Flag | Description | Default |
+|:---|:---|:---|
+| `--sweep` | Run full sweep across multiple N values | Off |
+| `--reps N` | Repetitions per N value | 5 |
+| `--n-values "10,50,100"` | Custom N values | `10,50,100,200,400,800` |
+| `--storm N` | Single retry storm test | - |
+| `--race N` | Single race condition test | - |
+| `--mode <name>` | Label for CSV output | `hardened` |
 
-1.  **Start Server (Safe):**
-    ```bash
-    # (Ctrl+C previous server)
-    uv run uvicorn app.main:create_app --port 8000
-    ```
+### Generate Plots
 
-2.  **Run Experiment:**
-    ```bash
-    uv run python -m experiments.runner --storm 50 --race 50 --mode hardened
-    ```
-
-3.  **Result:** Check `paper_results.csv`. You should see `integrity_violation=False`.
+```bash
+uv run python scripts/generate_plots.py
+# Output: docs/plots/integrity_plot.png, docs/plots/latency_plot.png
+```
 
 ---
 
@@ -145,23 +208,93 @@ Run the server in default **SAFE** mode.
 
 ```text
 .
-├── app
-│   ├── a2a          # Protocol schemas & message dispatcher
-│   ├── domain       # Core business logic (Checkout, Order, Product)
-│   ├── infra        # Persistence (SQLite), Locks, Idempotency
-│   ├── routes       # FastAPI endpoints
-│   ├── services     # Application services (CheckoutService)
-│   └── ucp          # UCP specific constants & models
-├── experiments      # Paper experiment harness
-│   ├── metrics.py   # CSV logging
-│   └── runner.py    # Main CLI runner
-├── tests            # Pytest suite
-│   ├── test_a2a_checkout_basics.py      # Phase 1: Functionality
-│   ├── test_p2_idempotency_hardened.py  # Phase 2: Safety logic
-│   └── test_p3_persistence.py           # Phase 3: Data survival
-├── demo.py          # Interactive console chat
-└── pyproject.toml   # Dependencies & config
+├── app/
+│   ├── a2a/                   # A2A Protocol (dispatcher, schemas)
+│   ├── domain/
+│   │   ├── errors.py          # DuplicateOrderError, StateConflictError
+│   │   └── models.py          # Checkout (with version), Order, Product
+│   ├── infra/
+│   │   ├── store.py           # SQLite with UNIQUE index + OCC
+│   │   ├── idempotency.py     # Message-level response caching
+│   │   └── lock_manager.py    # In-process checkout locking
+│   ├── routes/
+│   │   ├── a2a_rpc.py         # Main A2A JSON-RPC endpoint
+│   │   └── well_known.py      # UCP discovery endpoint
+│   ├── services/
+│   │   └── checkout_service.py # Hardened checkout logic
+│   ├── ucp/                   # UCP constants & schemas
+│   ├── main.py                # FastAPI app factory
+│   └── settings.py            # SAFETY_MODE configuration
+├── docs/
+│   ├── architecture/          # System design diagrams
+│   └── plots/                 # Generated experiment figures
+├── experiments/
+│   ├── runner.py              # CLI with --sweep mode
+│   └── metrics.py             # CSV result writer
+├── scripts/
+│   └── generate_plots.py      # Plotly figure generation
+├── tests/
+│   ├── conftest.py            # Shared fixtures
+│   ├── test_p1_*.py           # Phase 1: Basic functionality
+│   ├── test_p2_*.py           # Phase 2: Idempotency tests
+│   └── test_p3_*.py           # Phase 3: Persistence tests
+├── demo.py                    # Interactive console chat
+├── demo_fail.py               # Demonstration of failure modes
+└── pyproject.toml             # Dependencies & config
 ```
+
+---
+
+## 🔧 Configuration
+
+| Environment Variable | Description | Default |
+|:---|:---|:---|
+| `SAFETY_MODE` | `on` = Hardened, `off` = Baseline (Naive) | `on` |
+| `DATABASE_URL` | SQLite database path | `test.db` |
+
+---
+
+## 🧬 Technical Deep Dive
+
+### Optimistic Concurrency Control (OCC)
+
+The `version` column on `checkouts` table prevents mutation races:
+
+1. **Read Cart:** `version=1`
+2. **Add Item:** `save_checkout()` increments to `version=2`
+3. **Payment Attempt:** `create_order_safe(expected_version=1)` fails
+4. **Result:** `StateConflictError` - cart was modified during payment
+
+```python
+# In store.py
+async def create_order_safe(self, *, checkout: Checkout, expected_version: int) -> Order:
+    # Verify version hasn't changed since checkout was read
+    if real_version != expected_version:
+        raise StateConflictError(checkout_id, expected_version, real_version)
+    return await self.create_order(checkout=checkout)
+```
+
+### Database-Level Duplicate Prevention
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_checkout_id ON orders(checkout_id)
+```
+
+This constraint works **across all Uvicorn workers** - in-memory locks cannot provide this guarantee in multi-process deployments.
+
+---
+
+## 📊 Running Tests
+
+```bash
+# Run all tests
+uv run pytest tests/ -v
+
+# Run with coverage
+uv run pytest tests/ -v --cov=app
+```
+
+---
 
 ## 📜 License
 
@@ -169,5 +302,6 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 
 ## 🔗 References
 
-*   [Universal Commerce Protocol (UCP)](https://ucp.dev)
-*   [Agent-to-Agent Protocol Specification](https://a2a-protocol.org)
+- [Universal Commerce Protocol (UCP)](https://ucp.dev)
+- [Agent-to-Agent Protocol Specification](https://a2a-protocol.org)
+- [System Design Documentation](docs/architecture/system_design.md)
