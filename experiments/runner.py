@@ -213,26 +213,74 @@ def main():
     parser.add_argument("--storm", type=int, default=50)
     parser.add_argument("--race", type=int, default=10)
     parser.add_argument("--mode", type=str, default="hardened", help="Label for CSV (baseline/hardened)")
+    
+    # New: Sweep mode for paper experiments
+    parser.add_argument("--sweep", action="store_true", help="Run full sweep across multiple N values")
+    parser.add_argument("--reps", type=int, default=5, help="Repetitions per N value (default: 5)")
+    parser.add_argument("--n-values", type=str, default="10,50,100,200,400,800", 
+                        help="Comma-separated N values for sweep (default: 10,50,100,200,400,800)")
     args = parser.parse_args()
 
     writer = CSVWriter(CSV_FILE)
     
-    print(f"Running Experiments -> {CSV_FILE} [Mode: {args.mode}]")
+    if args.sweep:
+        # Full sweep mode for paper experiments
+        n_values = [int(n.strip()) for n in args.n_values.split(",")]
+        total_runs = len(n_values) * args.reps * 3  # 3 scenarios
+        current = 0
+        
+        print(f"=== SWEEP MODE: {args.mode} ===")
+        print(f"N values: {n_values}")
+        print(f"Repetitions: {args.reps}")
+        print(f"Total runs: {total_runs}")
+        print(f"Output: {CSV_FILE}")
+        print("=" * 40)
+        
+        for n in n_values:
+            print(f"\n[N={n}] Running {args.reps} repetitions...")
+            
+            for rep in range(1, args.reps + 1):
+                current += 3
+                print(f"  Rep {rep}/{args.reps} ({current}/{total_runs})...", end=" ", flush=True)
+                
+                # Storm
+                res1 = asyncio.run(run_retry_storm(n, args.mode))
+                writer.write(res1)
+                
+                # Race (use N/5 for race, min 2)
+                race_n = max(2, n // 5)
+                res2 = asyncio.run(run_race_condition(race_n, args.mode))
+                writer.write(res2)
+                
+                # Mutation (use N/10 pairs, min 2)
+                mut_n = max(2, n // 10)
+                res3 = asyncio.run(run_mutation_race(mut_n, args.mode))
+                writer.write(res3)
+                
+                violations = [res1.integrity_violation, res2.integrity_violation, res3.integrity_violation]
+                print(f"Violations: {sum(violations)}/3")
+        
+        print(f"\n=== SWEEP COMPLETE: Results in {CSV_FILE} ===")
     
-    # 1. Storm
-    res1 = asyncio.run(run_retry_storm(args.storm, args.mode))
-    writer.write(res1)
-    print(f" > Storm Result: Violation={res1.integrity_violation}")
+    else:
+        # Original single-run mode
+        print(f"Running Experiments -> {CSV_FILE} [Mode: {args.mode}]")
+        
+        # 1. Storm
+        res1 = asyncio.run(run_retry_storm(args.storm, args.mode))
+        writer.write(res1)
+        print(f" > Storm Result: Violation={res1.integrity_violation}")
 
-    # 2. Race
-    res2 = asyncio.run(run_race_condition(args.race, args.mode))
-    writer.write(res2)
-    print(f" > Race Result:  Violation={res2.integrity_violation}")
-    
-    # 3. Mutation (New) - Use 'race' count for N pairs
-    res3 = asyncio.run(run_mutation_race(args.race, args.mode))
-    writer.write(res3)
-    print(f" > Mutation Result: Violation={res3.integrity_violation}, {res3.notes}")
+        # 2. Race
+        res2 = asyncio.run(run_race_condition(args.race, args.mode))
+        writer.write(res2)
+        print(f" > Race Result:  Violation={res2.integrity_violation}")
+        
+        # 3. Mutation (New) - Use 'race' count for N pairs
+        res3 = asyncio.run(run_mutation_race(args.race, args.mode))
+        writer.write(res3)
+        print(f" > Mutation Result: Violation={res3.integrity_violation}, {res3.notes}")
 
 if __name__ == "__main__":
     main()
+
