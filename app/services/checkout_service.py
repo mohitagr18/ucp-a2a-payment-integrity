@@ -1,6 +1,6 @@
 from app.infra.store import Store
 from app.domain.models import Checkout, LineItem, CheckoutStatus
-from app.domain.errors import DuplicateOrderError
+from app.domain.errors import DuplicateOrderError, StateConflictError
 from app.infra.lock_manager import LockManager, InMemoryLockManager
 from app.infra.idempotency import IdempotencyStore, IdempotencyKey, InMemoryIdempotencyStore
 from app.settings import settings
@@ -115,9 +115,21 @@ class CheckoutService:
             if checkout.status == CheckoutStatus.COMPLETED:
                 return checkout
 
-            # Logic - with DB-level idempotency for multi-worker safety
+            # Capture version for optimistic concurrency check
+            expected_version = checkout.version
+
+            # Logic - with DB-level idempotency + optimistic concurrency for multi-worker safety
             try:
-                order = await self.store.create_order(checkout=checkout)
+                order = await self.store.create_order_safe(
+                    checkout=checkout, 
+                    expected_version=expected_version
+                )
+            except StateConflictError:
+                # Cart was modified during payment (mutation race)
+                # Re-fetch current state and return error/stale response
+                # In a real system, you'd retry or return an error to the client
+                checkout = await self.store.get_checkout(checkout_id)
+                return checkout  # Return current state, client should retry
             except DuplicateOrderError:
                 # Another worker won the race - fetch their order (idempotent success)
                 order = await self.store.get_order_by_checkout_id(checkout_id)
@@ -136,3 +148,4 @@ class CheckoutService:
             
             await self.idempotency.put(key, {"status": "done"})
             return checkout
+

@@ -25,6 +25,7 @@ class Checkout:
     status: CheckoutStatus
     line_items: list[LineItem] = field(default_factory=list)
     total_cents: int = 0
+    version: int = 1  # Optimistic concurrency control
     order_id: str | None = None
     order_permalink_url: str | None = None
 

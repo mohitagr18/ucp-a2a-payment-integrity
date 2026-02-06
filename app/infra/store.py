@@ -5,7 +5,7 @@ import aiosqlite
 import uuid
 from dataclasses import asdict
 from app.domain.models import Product, Checkout, Order, CheckoutStatus, LineItem
-from app.domain.errors import DuplicateOrderError
+from app.domain.errors import DuplicateOrderError, StateConflictError
 
 class Store(Protocol):
     async def list_products(self) -> list[Product]: ...
@@ -14,6 +14,7 @@ class Store(Protocol):
     async def get_checkout(self, checkout_id: str) -> Optional[Checkout]: ...
     async def save_checkout(self, checkout: Checkout) -> None: ...
     async def create_order(self, *, checkout: Checkout) -> Order: ...
+    async def create_order_safe(self, *, checkout: Checkout, expected_version: int) -> Order: ...
     async def get_order(self, order_id: str) -> Optional[Order]: ...
     async def get_order_by_checkout_id(self, checkout_id: str) -> Optional[Order]: ...
 
@@ -57,6 +58,13 @@ class InMemoryStore(Store):
         o = Order(oid, checkout.checkout_id, checkout.total_cents, f"http://mock/orders/{oid}")
         self.orders[oid] = o
         return o
+
+    async def create_order_safe(self, *, checkout: Checkout, expected_version: int) -> Order:
+        """Create order with optimistic concurrency check."""
+        current = self.checkouts.get(checkout.checkout_id)
+        if current and current.version != expected_version:
+            raise StateConflictError(checkout.checkout_id, expected_version, current.version)
+        return await self.create_order(checkout=checkout)
         
     async def get_order(self, order_id: str) -> Optional[Order]:
         return self.orders.get(order_id)
@@ -87,6 +95,7 @@ class SQLiteStore(Store):
                     status TEXT,
                     total_cents INTEGER,
                     line_items_json TEXT,
+                    version INTEGER DEFAULT 1,
                     order_id TEXT,
                     order_permalink_url TEXT
                 )
@@ -137,21 +146,20 @@ class SQLiteStore(Store):
 
     async def create_checkout(self) -> Checkout:
         cid = str(uuid.uuid4())
-        c = Checkout(checkout_id=cid, status=CheckoutStatus.INCOMPLETE)
+        c = Checkout(checkout_id=cid, status=CheckoutStatus.INCOMPLETE, version=1)
         
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT INTO checkouts (checkout_id, status, total_cents, line_items_json) VALUES (?, ?, ?, ?)",
-                (cid, c.status.value, 0, "[]")
+                "INSERT INTO checkouts (checkout_id, status, total_cents, line_items_json, version) VALUES (?, ?, ?, ?, ?)",
+                (cid, c.status.value, 0, "[]", 1)
             )
             await db.commit()
         return c
 
     async def get_checkout(self, checkout_id: str) -> Optional[Checkout]:
         async with aiosqlite.connect(self.db_path) as db:
-            # FIX: Select columns explicitly to guarantee order
             query = """
-                SELECT checkout_id, status, total_cents, line_items_json, order_id, order_permalink_url 
+                SELECT checkout_id, status, total_cents, line_items_json, version, order_id, order_permalink_url 
                 FROM checkouts 
                 WHERE checkout_id=?
             """
@@ -160,7 +168,7 @@ class SQLiteStore(Store):
                 if not row:
                     return None
                 
-                cid, status_str, total, items_json, oid, url = row
+                cid, status_str, total, items_json, version, oid, url = row
                 
                 # Ensure items_json is a string list, or default to empty list if None/Empty
                 if not items_json:
@@ -178,23 +186,29 @@ class SQLiteStore(Store):
                     status=CheckoutStatus(status_str),
                     total_cents=total,
                     line_items=line_items,
+                    version=version or 1,
                     order_id=oid,
                     order_permalink_url=url
                 )
 
 
     async def save_checkout(self, checkout: Checkout) -> None:
+        """Save checkout and increment version (for mutation tracking)."""
         items_json = json.dumps([asdict(li) for li in checkout.line_items])
+        new_version = checkout.version + 1
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
                 UPDATE checkouts 
-                SET status=?, total_cents=?, line_items_json=?, order_id=?, order_permalink_url=?
+                SET status=?, total_cents=?, line_items_json=?, version=?, order_id=?, order_permalink_url=?
                 WHERE checkout_id=?
                 """,
-                (checkout.status.value, checkout.total_cents, items_json, checkout.order_id, checkout.order_permalink_url, checkout.checkout_id)
+                (checkout.status.value, checkout.total_cents, items_json, new_version, 
+                 checkout.order_id, checkout.order_permalink_url, checkout.checkout_id)
             )
             await db.commit()
+        # Update the in-memory version
+        checkout.version = new_version
 
     async def create_order(self, *, checkout: Checkout) -> Order:
         oid = str(uuid.uuid4())
@@ -213,6 +227,35 @@ class SQLiteStore(Store):
                 raise DuplicateOrderError(checkout.checkout_id) from e
             raise
 
+    async def create_order_safe(self, *, checkout: Checkout, expected_version: int) -> Order:
+        """Create order with optimistic concurrency check.
+        
+        Verifies that the checkout version hasn't changed since checkout was read,
+        preventing the 'sneaky add' race where items are added during payment.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            # 1. Verify cart state (optimistic lock check)
+            async with db.execute(
+                "SELECT version, total_cents FROM checkouts WHERE checkout_id=?",
+                (checkout.checkout_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    raise ValueError(f"Checkout {checkout.checkout_id} not found")
+                
+                real_version, real_total = row
+                
+                # RACE DETECTED: cart was modified during payment!
+                if real_version != expected_version:
+                    raise StateConflictError(checkout.checkout_id, expected_version, real_version)
+                
+                # Also check total hasn't changed (belt and suspenders)
+                if real_total != checkout.total_cents:
+                    raise StateConflictError(checkout.checkout_id, expected_version, real_version)
+        
+        # 2. If safe, proceed with normal order creation
+        return await self.create_order(checkout=checkout)
+
     async def get_order_by_checkout_id(self, checkout_id: str) -> Order | None:
         """Fetch an existing order by checkout_id for idempotent responses."""
         async with aiosqlite.connect(self.db_path) as db:
@@ -224,3 +267,4 @@ class SQLiteStore(Store):
                 if not row:
                     return None
                 return Order(*row)
+
