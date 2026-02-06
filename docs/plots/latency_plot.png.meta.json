@@ -1,0 +1,1 @@
+{"caption": "Figure 2: Latency Scalability. The 95th percentile latency grows linearly with concurrency, confirming the database lock handling is stable even at N=800.", "description": "Line chart showing P95 latency increasing from ~20ms at N=10 to ~2100ms at N=800."}

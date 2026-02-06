@@ -1,0 +1,1 @@
+{"caption": "Figure 1: Payment Integrity Results. The Baseline system allows duplicate orders to scale linearly with requests (Double Spend), while the Hardened system enforces exactly 1 order.", "description": "Bar chart comparing unique orders created by Baseline vs Hardened modes across concurrency levels N=10 to N=800."}

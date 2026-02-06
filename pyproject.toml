@@ -11,6 +11,9 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pydantic-settings>=2.0.0",
     "aiosqlite>=0.22.1",
+    "pandas>=3.0.0",
+    "plotly>=6.5.2",
+    "kaleido>=1.2.0",
 ]
 
 [project.scripts]
