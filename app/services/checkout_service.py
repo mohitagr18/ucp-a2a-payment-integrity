@@ -1,5 +1,6 @@
 from app.infra.store import Store
 from app.domain.models import Checkout, LineItem, CheckoutStatus
+from app.domain.errors import DuplicateOrderError
 from app.infra.lock_manager import LockManager, InMemoryLockManager
 from app.infra.idempotency import IdempotencyStore, IdempotencyKey, InMemoryIdempotencyStore
 from app.settings import settings
@@ -114,8 +115,19 @@ class CheckoutService:
             if checkout.status == CheckoutStatus.COMPLETED:
                 return checkout
 
-            # Logic
-            order = await self.store.create_order(checkout=checkout)
+            # Logic - with DB-level idempotency for multi-worker safety
+            try:
+                order = await self.store.create_order(checkout=checkout)
+            except DuplicateOrderError:
+                # Another worker won the race - fetch their order (idempotent success)
+                order = await self.store.get_order_by_checkout_id(checkout_id)
+                if order:
+                    checkout.order_id = order.order_id
+                    checkout.order_permalink_url = order.permalink_url
+                    checkout.status = CheckoutStatus.COMPLETED
+                    return checkout
+                raise  # Should never happen if constraint is working
+            
             checkout.order_id = order.order_id
             checkout.order_permalink_url = order.permalink_url
             checkout.status = CheckoutStatus.COMPLETED

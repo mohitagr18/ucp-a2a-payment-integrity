@@ -1,18 +1,6 @@
 import pytest
-from app.main import create_app
 from app.ucp.constants import DATAPART_CHECKOUT_KEY, PAYMENT_DATA_KEY
-from httpx import AsyncClient, ASGITransport
 
-@pytest.fixture
-async def client():
-    """
-    Creates an async HTTP client bound to the FastAPI app.
-    Using 'async with' ensures proper setup/teardown of the app lifespan.
-    """
-    app = create_app()
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
 
 @pytest.mark.asyncio
 async def test_checkout_flow(client):

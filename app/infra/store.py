@@ -1,9 +1,11 @@
 from typing import Protocol, Optional
 import json
+import sqlite3
 import aiosqlite
 import uuid
 from dataclasses import asdict
 from app.domain.models import Product, Checkout, Order, CheckoutStatus, LineItem
+from app.domain.errors import DuplicateOrderError
 
 class Store(Protocol):
     async def list_products(self) -> list[Product]: ...
@@ -13,6 +15,7 @@ class Store(Protocol):
     async def save_checkout(self, checkout: Checkout) -> None: ...
     async def create_order(self, *, checkout: Checkout) -> Order: ...
     async def get_order(self, order_id: str) -> Optional[Order]: ...
+    async def get_order_by_checkout_id(self, checkout_id: str) -> Optional[Order]: ...
 
 class InMemoryStore(Store):
     def __init__(self):
@@ -46,6 +49,10 @@ class InMemoryStore(Store):
         self.checkouts[checkout.checkout_id] = checkout
 
     async def create_order(self, *, checkout: Checkout) -> Order:
+        # Check if order already exists for this checkout (in-memory simulation)
+        for existing in self.orders.values():
+            if existing.checkout_id == checkout.checkout_id:
+                raise DuplicateOrderError(checkout.checkout_id)
         oid = str(uuid.uuid4())
         o = Order(oid, checkout.checkout_id, checkout.total_cents, f"http://mock/orders/{oid}")
         self.orders[oid] = o
@@ -53,6 +60,12 @@ class InMemoryStore(Store):
         
     async def get_order(self, order_id: str) -> Optional[Order]:
         return self.orders.get(order_id)
+
+    async def get_order_by_checkout_id(self, checkout_id: str) -> Optional[Order]:
+        for order in self.orders.values():
+            if order.checkout_id == checkout_id:
+                return order
+        return None
 
 class SQLiteStore(Store):
     def __init__(self, db_path: str):
@@ -85,6 +98,11 @@ class SQLiteStore(Store):
                     total_cents INTEGER,
                     permalink_url TEXT
                 )
+            """)
+            # Ensure at most one order per checkout (multi-worker safety)
+            await db.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_checkout_id 
+                ON orders(checkout_id)
             """)
             await db.commit()
             await self._seed_products(db)
@@ -182,10 +200,27 @@ class SQLiteStore(Store):
         oid = str(uuid.uuid4())
         permalink = f"http://localhost:8000/orders/{oid}"
         o = Order(oid, checkout.checkout_id, checkout.total_cents, permalink)
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "INSERT INTO orders (order_id, checkout_id, total_cents, permalink_url) VALUES (?, ?, ?, ?)",
+                    (oid, o.checkout_id, o.total_cents, o.permalink_url)
+                )
+                await db.commit()
+            return o
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed" in str(e) or "idx_orders_checkout_id" in str(e):
+                raise DuplicateOrderError(checkout.checkout_id) from e
+            raise
+
+    async def get_order_by_checkout_id(self, checkout_id: str) -> Order | None:
+        """Fetch an existing order by checkout_id for idempotent responses."""
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT INTO orders (order_id, checkout_id, total_cents, permalink_url) VALUES (?, ?, ?, ?)",
-                (oid, o.checkout_id, o.total_cents, o.permalink_url)
-            )
-            await db.commit()
-        return o
+            async with db.execute(
+                "SELECT order_id, checkout_id, total_cents, permalink_url FROM orders WHERE checkout_id=?",
+                (checkout_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                return Order(*row)

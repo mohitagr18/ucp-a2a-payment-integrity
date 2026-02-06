@@ -34,7 +34,8 @@ async def run_retry_storm(n_retries: int, mode_label: str):
     run_id = str(uuid.uuid4())[:8]
     print(f"[{run_id}] Starting Retry Storm (N={n_retries}, Mode={mode_label})...")
     
-    async with httpx.AsyncClient(base_url=BASE_URL, timeout=30.0) as client:
+    limits = httpx.Limits(max_connections=1200, max_keepalive_connections=100)
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=60.0, limits=limits) as client:
         context_id = f"ctx_{run_id}"
         cid = await setup_checkout(client, context_id)
         
@@ -89,7 +90,8 @@ async def run_race_condition(n_workers: int, mode_label: str):
     run_id = str(uuid.uuid4())[:8]
     print(f"[{run_id}] Starting Race Condition (N={n_workers}, Mode={mode_label})...")
 
-    async with httpx.AsyncClient(base_url=BASE_URL, timeout=30.0) as client:
+    limits = httpx.Limits(max_connections=1200, max_keepalive_connections=100)
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=60.0, limits=limits) as client:
         context_id = f"ctx_{run_id}"
         cid = await setup_checkout(client, context_id)
 
@@ -141,7 +143,8 @@ async def run_mutation_race(n_pairs: int, mode_label: str):
     run_id = str(uuid.uuid4())[:8]
     print(f"[{run_id}] Starting Mutation Race (N={n_pairs}, Mode={mode_label})...")
 
-    async with httpx.AsyncClient(base_url=BASE_URL, timeout=30.0) as client:
+    limits = httpx.Limits(max_connections=1200, max_keepalive_connections=100)
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=60.0, limits=limits) as client:
         context_id = f"ctx_{run_id}"
         
         violations = 0
