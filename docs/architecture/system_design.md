@@ -217,3 +217,37 @@ stateDiagram
         on checkout_id
   end note
 ```
+
+---
+
+## 6. Conflict Recovery After OCC Rejection
+
+Shows the post-conflict path after a stale write is rejected: the payment attempt arrives with an expected checkout version, the persistence layer detects that storage has advanced, the write fails with a conflict, and the caller must refetch current state before retrying or asking for reconfirmation.
+
+```mermaid
+sequenceDiagram
+    participant Agent as Agent / Client
+    participant API as Checkout Service
+    participant DB as Persistence Layer
+    participant User as User / Upstream Workflow
+
+    Agent->>API: Complete checkout(checkout_id, expected_version = n)
+    API->>DB: create_order_safe(checkout_id, expected_version = n)
+    DB->>DB: Re-read checkout version and total
+
+    alt State still matches version n
+        DB-->>API: Commit order
+        API-->>Agent: Success, return committed order
+    else State changed to version n+1
+        DB-->>API: 409 StateConflictError
+        API-->>Agent: Conflict, latest version = n+1
+        Agent->>DB: Refetch latest checkout state
+
+        alt Updated state still acceptable
+            Agent->>API: Retry complete checkout(expected_version = n+1)
+        else Approval required
+            Agent->>User: Ask for reconfirmation
+        end
+    end
+
+```
