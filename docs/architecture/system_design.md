@@ -251,3 +251,42 @@ sequenceDiagram
     end
 
 ```
+
+---
+
+## 7. Retry-safe checkout completion across concurrent workers.
+Stable request identity distinguishes repeated delivery from new intent, a durable idempotency ledger records the winning business action, and the database uniqueness rule on orders(checkout_id) ensures that concurrent writers converge on one committed order.
+
+```mermaid
+
+sequenceDiagram
+    participant C as Client or Agent
+    participant W1 as Worker A
+    participant W2 as Worker B
+    participant L as Idempotency Ledger
+    participant DB as orders table UNIQUE(checkout_id)
+
+    C->>W1: complete_checkout(contextid, messageid, checkout_id)
+    W1->>L: lookup IdempotencyKey(contextid, messageid, complete_checkout)
+    L-->>W1: no committed result found
+    W1->>DB: INSERT order for checkout_id=123
+
+    Note over C: acknowledgement is delayed or lost
+
+    C->>W2: retry same complete_checkout(contextid, messageid, checkout_id)
+    W2->>L: lookup same idempotency key
+    L-->>W2: race window still open
+    W2->>DB: INSERT order for checkout_id=123
+
+    DB-->>W1: insert succeeds
+    W1->>L: record key -> committed order result
+
+    DB-->>W2: unique constraint violation
+    W2->>DB: SELECT order by checkout_id=123
+    DB-->>W2: existing committed order
+    W2->>L: record or reconcile key -> same committed result
+
+    W1-->>C: completed order
+    W2-->>C: same completed order
+
+```
