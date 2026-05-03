@@ -298,38 +298,20 @@ Early idempotency lookup and in-memory locking can intercept likely duplicates, 
 
 ```mermaid
 
-sequenceDiagram
-    participant W1 as Worker 1
-    participant W2 as Worker 2
-    participant IDS as IdempotencyStore
-    participant LM as InMemoryLockManager
-    participant DB as orders(checkout_id UNIQUE)
+flowchart TD
+    A[Request arrives: complete_checkout] --> B[Fast path: idempotency lookup]
+    B -->|Hit| C[Return recorded result]
+    B -->|Miss| D[Local coordination: InMemoryLockManager]
 
-    W1->>IDS: get(key)
-    IDS-->>W1: miss
-    W2->>IDS: get(key)
-    IDS-->>W2: miss
+    D --> E[Slow path: attempt order insert]
+    E --> F[DB boundary: UNIQUE orders checkout_id]
 
-    W1->>LM: lock(checkout_id)
-    LM-->>W1: acquired
-    W2->>LM: lock(checkout_id)
-    LM-->>W2: waits only if same process
+    F -->|Winner| G[Insert succeeds]
+    G --> H[Store replay record]
+    H --> I[Return completed checkout]
 
-    W1->>DB: INSERT order(checkout_id=X)
-    DB-->>W1: success
-    W1->>IDS: put(key, response)
-    W1-->>Client: return completed checkout, order_id=X
-
-    alt W2 serialized in same process
-        W2->>IDS: get(key)
-        IDS-->>W2: hit
-        W2-->>Client: return completed checkout, order_id=X
-    else W2 running in different worker
-        W2->>DB: INSERT order(checkout_id=X)
-        DB-->>W2: unique violation
-        W2->>DB: SELECT order by checkout_id
-        DB-->>W2: existing order_id=X
-        W2-->>Client: return completed checkout, order_id=X
-    end
+    F -->|Loser| J[DuplicateOrderError]
+    J --> K[get_order_by_checkout_id checkout_id]
+    K --> L[Return same committed order]
 
 ````
