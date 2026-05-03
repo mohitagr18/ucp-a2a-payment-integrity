@@ -290,3 +290,46 @@ sequenceDiagram
     W2-->>C: same completed order
 
 ```
+
+---
+
+## 8. Fast path versus atomic slow path. 
+Early idempotency lookup and in-memory locking can intercept likely duplicates, but only the database unique constraint on orders(checkout_id) settles the race across workers. The winning request commits the order, and the losing request re-reads that canonical row and returns the same business result. 
+
+```mermaid
+
+sequenceDiagram
+    participant W1 as Worker 1
+    participant W2 as Worker 2
+    participant IDS as IdempotencyStore
+    participant LM as InMemoryLockManager
+    participant DB as orders(checkout_id UNIQUE)
+
+    W1->>IDS: get(key)
+    IDS-->>W1: miss
+    W2->>IDS: get(key)
+    IDS-->>W2: miss
+
+    W1->>LM: lock(checkout_id)
+    LM-->>W1: acquired
+    W2->>LM: lock(checkout_id)
+    LM-->>W2: waits only if same process
+
+    W1->>DB: INSERT order(checkout_id=X)
+    DB-->>W1: success
+    W1->>IDS: put(key, response)
+    W1-->>Client: return completed checkout, order_id=X
+
+    alt W2 serialized in same process
+        W2->>IDS: get(key)
+        IDS-->>W2: hit
+        W2-->>Client: return completed checkout, order_id=X
+    else W2 running in different worker
+        W2->>DB: INSERT order(checkout_id=X)
+        DB-->>W2: unique violation
+        W2->>DB: SELECT order by checkout_id
+        DB-->>W2: existing order_id=X
+        W2-->>Client: return completed checkout, order_id=X
+    end
+
+````
