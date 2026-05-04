@@ -318,7 +318,8 @@ flowchart TD
 
 ---
 
-## 9. The schema settles the race. Advisory replay checks may detect likely duplicates early, but the unique index on orders(checkout_id) is the shared enforcement point that allows one committed order row and forces the loser to reconcile by re-reading the canonical order.
+## 9. The schema settles the race. 
+Advisory replay checks may detect likely duplicates early, but the unique index on orders(checkout_id) is the shared enforcement point that allows one committed order row and forces the loser to reconcile by re-reading the canonical order.
 
 ```mermaid
 
