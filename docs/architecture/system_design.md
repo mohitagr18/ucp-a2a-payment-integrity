@@ -314,4 +314,36 @@ flowchart TD
     J --> K[get_order_by_checkout_id checkout_id]
     K --> L[Return same committed order]
 
-````
+```
+
+---
+
+## 9. The schema settles the race. Advisory replay checks may detect likely duplicates early, but the unique index on orders(checkout_id) is the shared enforcement point that allows one committed order row and forces the loser to reconcile by re-reading the canonical order.
+
+```mermaid
+
+flowchart TD
+    A[Worker A receives complete_checkout] --> B[Carry request identity]
+    C[Worker B receives retry for same checkout] --> D[Carry same request identity]
+
+    B --> E[Advisory replay lookup]
+    D --> F[Advisory replay lookup]
+
+    E --> G[Store attempts INSERT into orders]
+    F --> H[Store attempts INSERT into orders]
+
+    G --> I[(UNIQUE index: orders.checkout_id)]
+    H --> I
+
+    I -->|winner| J[One order row commits]
+    I -->|loser| K[sqlite3.IntegrityError]
+
+    K --> L[Store raises DuplicateOrderError]
+    L --> M[Service calls get_order_by_checkout_id]
+
+    J --> N[Canonical order exists]
+    M --> N
+
+    N --> O[Repeated delivery converges on one durable result]
+
+```
