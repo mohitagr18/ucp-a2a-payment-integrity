@@ -348,3 +348,27 @@ flowchart TD
     N --> O[Repeated delivery converges on one durable result]
 
 ```
+
+---
+
+## 10. Commit authority stays below the model boundary. 
+The model may select complete_checkout, and local replay checks may reduce duplicate work, but only the database commit boundary can decide whether a new order is created or a duplicate must reconcile to the canonical row.
+
+```mermaid
+
+flowchart TD
+    A[User intent] --> B[LLM selects action: complete_checkout]
+    B --> C[Service binds durable request identity]
+    C --> D[Replay lookup via idempotency layer<br/>advisory]
+    C --> E[InMemoryLockManager<br/>local advisory only]
+    D --> F[Store issues order insert]
+    E --> F
+    F --> G{Database commit boundary<br/>UNIQUE checkout_id}
+    G -->|Commit succeeds| H[New order committed]
+    G -->|Duplicate rejected| I[DuplicateOrderError]
+    I --> J[Service re-reads get_order_by_checkout_id]
+    H --> K[Return canonical durable result]
+    J --> K
+    K --> L[LLM may explain result after commit]
+
+```
