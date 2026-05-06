@@ -372,3 +372,39 @@ flowchart TD
     K --> L[LLM may explain result after commit]
 
 ```
+
+---
+
+## 11. Checkout version lifecycle. 
+A payment attempt begins from one persisted checkout version. If another actor mutates the checkout before commit, the version advances and the original payment attempt becomes stale. The order path must compare the caller's last-seen version with storage before creating the order.
+
+```mermaid
+
+stateDiagram-v2
+    [*] --> Incomplete_v1: create_checkout()
+
+    Incomplete_v1 --> Incomplete_v2: add_to_checkout(), save_checkout()
+    Incomplete_v2 --> Ready_v3: start_payment(), save_checkout()
+
+    Ready_v3 --> Mutated_v4: concurrent cart change, save_checkout(), version = 4
+    Ready_v3 --> CommitCheck: complete_checkout(), expected_version = 3
+
+    CommitCheck --> Completed_v4: stored version = 3, order created, save_checkout()
+    CommitCheck --> Conflict: stored version != 3, raise StateConflictError
+
+    note right of Ready_v3
+      Payment starts from a specific
+      persisted checkout version.
+    end note
+
+    note right of Mutated_v4
+      Another actor changes the checkout
+      before payment commits.
+    end note
+
+    note right of Conflict
+      The original write is stale and must
+      refresh state before any next step.
+    end note
+
+```
